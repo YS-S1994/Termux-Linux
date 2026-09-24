@@ -1,0 +1,150 @@
+name: Build Android PRoot
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;34.0.0" \
+            "ndk;27.0.12077973"
+
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > android/local.properties
+
+          cat android/local.properties
+
+      - name: Make Gradle executable
+        shell: bash
+        run: |
+          set -e
+          chmod +x android/gradlew
+
+      - name: Verify project structure
+        shell: bash
+        run: |
+          set -e
+
+          test -f android/gradlew
+          test -f android/settings.gradle.kts
+
+          echo "Project structure OK"
+
+      - name: Verify ARM64 PRoot binaries
+        shell: bash
+        run: |
+          set -e
+
+          LIBDIR="android/proot-engine/src/main/jniLibs/arm64-v8a"
+
+          echo "=== ARM64 native libraries ==="
+
+          test -f "$LIBDIR/libproot.so"
+          test -f "$LIBDIR/libproot-loader.so"
+          test -f "$LIBDIR/libpr-cli.so"
+
+          ls -lh \
+            "$LIBDIR/libproot.so" \
+            "$LIBDIR/libproot-loader.so" \
+            "$LIBDIR/libpr-cli.so"
+
+          echo
+          echo "=== ELF information ==="
+
+          file \
+            "$LIBDIR/libproot.so" \
+            "$LIBDIR/libproot-loader.so" \
+            "$LIBDIR/libpr-cli.so"
+
+      - name: Build Debug APK
+        working-directory: android
+        shell: bash
+        run: |
+          set -e
+
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      - name: Locate APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== Generated APK files ==="
+
+          find android/app/build/outputs \
+            -type f \
+            -name "*.apk" \
+            -print
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -e
+
+          APK="$(find android/app/build/outputs/apk/debug \
+            -type f \
+            -name "*.apk" \
+            | head -n 1)"
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated"
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          ls -lh "$APK"
+
+          echo
+          echo "=== ARM64 libraries inside APK ==="
+
+          unzip -l "$APK" | grep -E \
+            'lib/arm64-v8a/(libproot|libproot-loader|libpr-cli)\.so'
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Termux-Linux-PRoot-arm64-debug
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
